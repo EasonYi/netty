@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 The Netty Project
+ * Copyright 2015 The Netty Project
  *
  * The Netty Project licenses this file to you under the Apache License,
  * version 2.0 (the "License"); you may not use this file except in compliance
@@ -31,17 +31,17 @@ import io.netty.handler.ssl.OpenSslServerContext;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
-import io.netty.testsuite.util.TestUtils;
 import io.netty.util.concurrent.Future;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
-import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
 import java.io.File;
 import java.security.cert.CertificateException;
@@ -55,9 +55,8 @@ import static org.junit.Assert.*;
 @RunWith(Parameterized.class)
 public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
 
-    private static final InternalLogger logger = InternalLoggerFactory.getInstance(SocketSslClientRenegotiateTest.class);
-
-    private static volatile int counter;
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(
+            SocketSslClientRenegotiateTest.class);
     private static final File CERT_FILE;
     private static final File KEY_FILE;
 
@@ -70,25 +69,23 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
         }
         CERT_FILE = ssc.certificate();
         KEY_FILE = ssc.privateKey();
-        // This will disable
-        System.setProperty("jdk.tls.rejectClientInitiatedRenegotiation", "true");
     }
-
 
     @Parameters(name =
             "{index}: serverEngine = {0}, clientEngine = {1}")
     public static Collection<Object[]> data() throws Exception {
         List<SslContext> serverContexts = new ArrayList<SslContext>();
-        serverContexts.add(new JdkSslServerContext(CERT_FILE, KEY_FILE));
+        if (PlatformDependent.javaVersion() >= 8) {
+            // Only supported on java8+.
+            serverContexts.add(new JdkSslServerContext(CERT_FILE, KEY_FILE));
+        }
 
         List<SslContext> clientContexts = new ArrayList<SslContext>();
         clientContexts.add(new JdkSslClientContext(CERT_FILE));
 
         boolean hasOpenSsl = OpenSsl.isAvailable();
         if (hasOpenSsl) {
-            OpenSslServerContext context = new OpenSslServerContext(CERT_FILE, KEY_FILE);
-            context.setRejectRemoteInitiatedRenegation(true);
-            serverContexts.add(context);
+            serverContexts.add(new OpenSslServerContext(CERT_FILE, KEY_FILE));
         } else {
             logger.warn("OpenSSL is unavailable and thus will not be tested.", OpenSsl.unavailabilityCause());
         }
@@ -118,9 +115,9 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
     private volatile SslHandler clientSslHandler;
     private volatile SslHandler serverSslHandler;
 
-    private final TestHandler clientHandler = new TestHandler(clientException, false);
+    private final TestHandler clientHandler = new TestHandler(clientException);
 
-    private final TestHandler serverHandler = new TestHandler(serverException, true);
+    private final TestHandler serverHandler = new TestHandler(serverException);
 
     public SocketSslClientRenegotiateTest(
             SslContext serverCtx, SslContext clientCtx) {
@@ -128,20 +125,23 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
         this.clientCtx = clientCtx;
     }
 
+    @BeforeClass
+    public static void before() {
+        // This will disable client initiated renegotiation on openssl and java8+
+        System.setProperty("jdk.tls.rejectClientInitiatedRenegotiation", "true");
+    }
+
+    @AfterClass
+    public static void after() {
+        System.setProperty("jdk.tls.rejectClientInitiatedRenegotiation", "false");
+    }
+
     @Test(timeout = 30000)
     public void testSslRenegotiationRejected() throws Throwable {
         run();
     }
 
-    @AfterClass
-    public static void compressHeapDumps() throws Exception {
-        TestUtils.compressHeapDumps();
-    }
-
     public void testSslRenegotiationRejected(ServerBootstrap sb, Bootstrap cb) throws Throwable {
-        if (++counter > 1) {
-            return;
-        }
         reset();
 
         sb.childHandler(new ChannelInitializer<Channel>() {
@@ -150,7 +150,6 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
             public void initChannel(Channel sch) throws Exception {
                 serverChannel = sch;
                 serverSslHandler = serverCtx.newHandler(sch.alloc());
-
 
                 sch.pipeline().addLast("ssl", serverSslHandler);
                 sch.pipeline().addLast("handler", serverHandler);
@@ -162,7 +161,6 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
             @SuppressWarnings("deprecation")
             public void initChannel(Channel sch) throws Exception {
                 clientChannel = sch;
-
                 clientSslHandler = clientCtx.newHandler(sch.alloc());
 
                 sch.pipeline().addLast("ssl", clientSslHandler);
@@ -177,7 +175,6 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
         clientHandshakeFuture.sync();
 
         String renegotiation = "SSL_RSA_WITH_RC4_128_SHA";
-        clientSslHandler.engine().setEnabledCipherSuites(new String[] { renegotiation });
         clientSslHandler.engine().setEnabledCipherSuites(new String[] { renegotiation });
         clientSslHandler.renegotiate().await();
         serverChannel.close().awaitUninterruptibly();
@@ -209,13 +206,10 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
     private static final class TestHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
         protected final AtomicReference<Throwable> exception;
-        private final boolean server;
 
-        TestHandler(AtomicReference<Throwable> exception, boolean server) {
+        TestHandler(AtomicReference<Throwable> exception) {
             this.exception = exception;
-            this.server = server;
         }
-
 
         @Override
         public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
@@ -224,16 +218,11 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-            if (logger.isWarnEnabled()) {
-                logger.warn("server = " + server + " - Unexpected exception", cause);
-            }
-
             exception.compareAndSet(null, cause);
             ctx.close();
         }
 
         @Override
-        public void channelRead0(ChannelHandlerContext ctx, ByteBuf in) throws Exception {
-        }
+        public void channelRead0(ChannelHandlerContext ctx, ByteBuf in) throws Exception { }
     }
 }

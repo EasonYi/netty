@@ -17,6 +17,7 @@ package io.netty.handler.ssl;
 
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.apache.tomcat.jni.CertificateVerifier;
@@ -128,6 +129,14 @@ public abstract class OpenSslContext extends SslContext {
         }
         this.mode = mode;
 
+        if (mode == SSL.SSL_MODE_SERVER) {
+            // To make it easier for users to replace JDK implemention with OpenSsl version we also use
+            // 'jdk.tls.rejectClientInitiatedRenegotiation' to allow disabling client initiated renegotiation.
+            // Java8+ uses this system property as well.
+            // See http://blog.ivanristic.com/2014/03/ssl-tls-improvements-in-java-8.html
+            rejectRemoteInitiatedRenegation =
+                    SystemPropertyUtil.getBoolean("jdk.tls.rejectClientInitiatedRenegotiation", false);
+        }
         final List<String> convertedCiphers;
         if (ciphers == null) {
             convertedCiphers = null;
